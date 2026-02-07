@@ -5,3 +5,5 @@ plotly
 
 tqdm
 requests
+tqdm
+requests
