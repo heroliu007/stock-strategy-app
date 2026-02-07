@@ -37,7 +37,7 @@ def load_data(stock_id, days):
     if df_price.empty: return None
     
     # 抓籌碼
-    df_chip = dl.taiwan_stock_institutional_investors_buy_sell(stock_id=stock_id, start_date=start_date, end_date=end_date)
+    df_chip = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date, end_date=end_date)
     
     # 資料整理
     df_price = df_price.rename(columns={"date": "Date", "open": "Open", "max": "High", "min": "Low", "close": "Close", "Trading_Volume": "Volume"})
