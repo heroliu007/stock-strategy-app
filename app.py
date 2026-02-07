@@ -4,40 +4,40 @@ from FinMind.data import DataLoader
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
+import time
 
 # ==========================================
-# 1. 網頁標題與側邊欄設定
+# 1. 網頁與側邊欄設定
 # ==========================================
-st.set_page_config(page_title="投信攻擊偵測儀", layout="wide")
+st.set_page_config(page_title="投信攻擊偵測儀 v2.0", layout="wide")
 st.title("🕵️‍♂️ 投信攻擊 + 動態籌碼分析")
 
-# 側邊欄：使用者輸入區
-st.sidebar.header("查詢設定")
-stock_id = st.sidebar.text_input("輸入股票代號", value="2330")
-days_back = st.sidebar.slider("回看天數", 30, 180, 90)
+# 側邊欄：模式選擇
+mode = st.sidebar.radio("選擇功能模式", ["🔎 單股深度分析", "🚀 多股批次快篩"])
 
-# 策略參數微調 (讓您可以隨時調整標準)
 st.sidebar.markdown("---")
-st.sidebar.subheader("策略參數")
+st.sidebar.subheader("策略參數設定")
 it_days = st.sidebar.number_input("投信連買天數", min_value=1, value=2)
 vol_mul = st.sidebar.number_input("爆量倍數", value=1.5)
 it_ratio = st.sidebar.number_input("投信佔比(%)", value=2.0)
 
 # ==========================================
-# 2. 抓取數據函數 (FinMind)
+# 2. 核心數據函數
 # ==========================================
-@st.cache_data(ttl=3600) # 設定快取，避免重複抓取
-def load_data(stock_id, days):
+@st.cache_data(ttl=3600)
+def get_stock_data(stock_id, days=120):
     dl = DataLoader()
     end_date = datetime.date.today().strftime("%Y-%m-%d")
     start_date = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     
-    # 抓股價
-    df_price = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date, end_date=end_date)
+    # 修正：使用正確的函數名稱
+    try:
+        df_price = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date, end_date=end_date)
+        df_chip = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date, end_date=end_date)
+    except Exception as e:
+        return None
+
     if df_price.empty: return None
-    
-    # 抓籌碼
-    df_chip = dl.taiwan_stock_institutional_investors(stock_id=stock_id, start_date=start_date, end_date=end_date)
     
     # 資料整理
     df_price = df_price.rename(columns={"date": "Date", "open": "Open", "max": "High", "min": "Low", "close": "Close", "Trading_Volume": "Volume"})
@@ -47,7 +47,6 @@ def load_data(stock_id, days):
     # 整理投信
     if not df_chip.empty:
         df_it = df_chip[df_chip['name'] == 'Investment_Trust']
-        # 處理沒有投信數據的情況
         if df_it.empty:
             df_price['IT_Net'] = 0
         else:
@@ -61,87 +60,103 @@ def load_data(stock_id, days):
         
     return df_price
 
-# ==========================================
-# 3. 核心邏輯計算
-# ==========================================
-df = load_data(stock_id, days_back)
-
-if df is not None:
+def analyze_strategy(df):
+    if df is None or len(df) < 60: return None
+    
     # 計算指標
     df['MA5_Vol'] = df['Volume'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
     
-    # 取得最新一筆資料
-    last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    # 判斷策略條件
-    # 1. 投信連買
-    cond_it_buy = (last_row['IT_Net'] > 0) and (prev_row['IT_Net'] > 0)
-    # 2. 投信佔比
-    it_percent = (last_row['IT_Net'] / last_row['Volume'] * 100) if last_row['Volume'] > 0 else 0
-    cond_it_ratio = it_percent >= it_ratio
-    # 3. 爆量
-    vol_ratio = last_row['Volume'] / last_row['MA5_Vol'] if last_row['MA5_Vol'] > 0 else 0
-    cond_vol = vol_ratio >= vol_mul
-    # 4. 長紅 (漲幅 > 3%)
-    pct_change = (last_row['Close'] - last_row['Open']) / last_row['Open'] * 100
-    cond_long_red = pct_change >= 3.0
-    # 5. 季線之上
-    cond_trend = last_row['Close'] > last_row['MA60']
-
-    # ==========================================
-    # 4. 畫面呈現
-    # ==========================================
+    # 策略邏輯
+    res = {}
+    res['price'] = last['Close']
+    res['pct_change'] = (last['Close'] - last['Open']) / last['Open'] * 100
     
-    # --- 狀態儀表板 ---
-    st.subheader(f"📊 {stock_id} 分析結果 ({df.index[-1].strftime('%Y-%m-%d')})")
+    # 條件
+    res['cond_it_buy'] = (last['IT_Net'] > 0) and (prev['IT_Net'] > 0)
+    res['it_percent'] = (last['IT_Net'] / last['Volume'] * 100) if last['Volume'] > 0 else 0
+    res['cond_it_ratio'] = res['it_percent'] >= it_ratio
     
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("收盤價", f"{last_row['Close']}", f"{pct_change:.2f}%")
-    col2.metric("投信今日買賣", f"{int(last_row['IT_Net'])} 張", delta_color="normal")
-    col3.metric("投信佔比", f"{it_percent:.2f}%", f"門檻: {it_ratio}%")
-    col4.metric("量增倍數", f"{vol_ratio:.1f}倍", f"門檻: {vol_mul}倍")
+    vol_ratio = last['Volume'] / last['MA5_Vol'] if last['MA5_Vol'] > 0 else 0
+    res['cond_vol'] = vol_ratio >= vol_mul
+    
+    res['cond_trend'] = last['Close'] > last['MA60']
+    res['is_buy'] = res['cond_it_buy'] and res['cond_it_ratio'] and res['cond_vol'] and res['cond_trend']
+    
+    return res, df
 
-    # --- 策略訊號燈 ---
-    st.markdown("### 🚦 策略訊號檢測")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.info("投信連買 ✅" if cond_it_buy else "投信未連買 ⬜")
-    c2.info("投信佔比達標 ✅" if cond_it_ratio else "佔比不足 ⬜")
-    c3.info("爆量攻擊 ✅" if cond_vol else "量能不足 ⬜")
-    c4.info("多頭趨勢 ✅" if cond_trend else "股價弱勢 ⬜")
+# ==========================================
+# 3. 介面邏輯
+# ==========================================
 
-    if cond_it_buy and cond_it_ratio and cond_vol and cond_long_red and cond_trend:
-        st.success("🔥🔥🔥 強力買進訊號出現！ 🔥🔥🔥")
-    elif last_row['IT_Net'] < 0 and last_row['Close'] < last_row['MA10']:
-        st.error("⚠️ 警戒：投信賣出且跌破10日線 (建議出場)")
-    else:
-        st.warning("觀察中 (未觸發特殊訊號)")
+if mode == "🔎 單股深度分析":
+    stock_id = st.text_input("輸入股票代號", value="2330")
+    days_back = st.slider("K線回看天數", 60, 365, 120)
+    
+    if stock_id:
+        df = get_stock_data(stock_id, days_back)
+        if df is not None:
+            analysis, df_calc = analyze_strategy(df)
+            
+            # 顯示分析結果
+            st.subheader(f"📊 {stock_id} 分析報告")
+            
+            # 訊號燈
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("投信連買", "✅ 是" if analysis['cond_it_buy'] else "❌ 否", f"今日:{int(df_calc.iloc[-1]['IT_Net'])}張")
+            c2.metric("投信佔比", f"{analysis['it_percent']:.1f}%", f"門檻:{it_ratio}%")
+            c3.metric("爆量倍數", f"{df_calc.iloc[-1]['Volume']/df_calc.iloc[-1]['MA5_Vol']:.1f}倍", f"門檻:{vol_mul}倍")
+            c4.metric("趨勢狀態", "多頭 ✅" if analysis['cond_trend'] else "空頭 🔻")
 
-    # --- 互動式圖表 (K線 + 投信) ---
-    st.markdown("---")
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.03, row_heights=[0.7, 0.3])
+            if analysis['is_buy']:
+                st.success(f"🔥 {stock_id} 符合所有買進條件！主力正在攻擊！")
+            
+            # 畫圖
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+            fig.add_trace(go.Candlestick(x=df_calc.index, open=df_calc['Open'], high=df_calc['High'], low=df_calc['Low'], close=df_calc['Close'], name='K線'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc['MA10'], line=dict(color='orange'), name='10日線'), row=1, col=1)
+            fig.add_trace(go.Bar(x=df_calc.index, y=df_calc['IT_Net'], marker_color=['red' if v>0 else 'green' for v in df_calc['IT_Net']], name='投信'), row=2, col=1)
+            fig.update_layout(height=500, xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
 
-    # K線圖
-    fig.add_trace(go.Candlestick(x=df.index,
-                    open=df['Open'], high=df['High'],
-                    low=df['Low'], close=df['Close'], name='K線'), row=1, col=1)
-    # 均線
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], line=dict(color='orange', width=1), name='10日線'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=1), name='60日線'), row=1, col=1)
-
-    # 投信買賣超 (柱狀圖)
-    colors = ['red' if v > 0 else 'green' for v in df['IT_Net']]
-    fig.add_trace(go.Bar(x=df.index, y=df['IT_Net'], marker_color=colors, name='投信買賣超'), row=2, col=1)
-
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 顯示數據表
-    with st.expander("查看詳細歷史數據"):
-        st.dataframe(df.sort_index(ascending=False).head(10))
-
-else:
-    st.error("找不到該股票數據，請確認代號是否正確。")
+elif mode == "🚀 多股批次快篩":
+    st.info("💡 輸入多個代號 (用逗號分隔)，系統將自動找出符合「投信連買」的標的。")
+    default_list = "2330, 2317, 2603, 3231, 2382, 2376, 2303, 2454, 3037, 3034"
+    stock_list_str = st.text_area("輸入觀察名單 (例如：0050成份股或您的自選股)", value=default_list, height=100)
+    
+    if st.button("開始掃描"):
+        stock_list = [s.strip() for s in stock_list_str.split(',') if s.strip()]
+        
+        progress_bar = st.progress(0)
+        results = []
+        
+        for i, code in enumerate(stock_list):
+            # 抓取並分析
+            df = get_stock_data(code, days=60)
+            if df is not None:
+                analysis, _ = analyze_strategy(df)
+                if analysis:
+                    # 只要符合「投信連買」就列出來
+                    if analysis['cond_it_buy']:
+                        status = "🔥 符合策略" if analysis['is_buy'] else "👀 投信佈局中"
+                        results.append({
+                            "代號": code,
+                            "狀態": status,
+                            "現價": analysis['price'],
+                            "投信佔比(%)": f"{analysis['it_percent']:.1f}",
+                            "漲跌幅(%)": f"{analysis['pct_change']:.1f}"
+                        })
+            
+            # 更新進度條
+            progress_bar.progress((i + 1) / len(stock_list))
+            time.sleep(0.1) # 避免請求過快
+            
+        if results:
+            st.success(f"掃描完成！發現 {len(results)} 檔投信關注股")
+            st.table(pd.DataFrame(results))
+        else:
+            st.warning("掃描完成，清單中沒有發現投信連買的股票。")
